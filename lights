@@ -1,0 +1,218 @@
+#!/bin/sh -
+
+# TODO: work out a way to use set -e
+
+# called through PATH we need to follow the symlink
+# to get the actual file path, and then the root dir
+dir=$(dirname $(readlink $0))
+info_dir=$dir/.info
+light_file=$info_dir/lights
+scene_file=$info_dir/scenes
+group_file=$info_dir/groups
+
+# die() prints an error and exits with 1
+die() {
+  echo "error: $1" >&2
+  exit 1 
+}
+
+# print_help_then_die() prints help then calls die
+print_help_then_die() {
+  print_help >&2
+  die "$1"
+} 
+
+# parse_response() takes whatever the resonse was for a curl
+# command and parses it with jq to present the user with a 
+# succinct 
+parse_response() {
+  err=$(jq -e '.[].error.description' <<< "$*")
+  if [ $? = 0 ]; then
+    die "$err"
+  fi
+  while read msg; do
+    echo "success: $msg"
+  done <<< "$(jq -c '.[] | .success' <<< "$*")"
+}
+
+# get() makes a GET request to the given url
+get() {
+  curl -s $1
+}
+
+# put() makes a PUT request to the give url with whatever data
+# is given to it
+put() {
+  curl -s --request PUT --data "$1" $2
+}
+
+all_light_ids() {
+  echo "$( jq 'keys  | .[]' < $light_file | sed 's/"//g' )"
+}
+
+# toggle() turns a light on/off
+toggle() {
+  ids=()
+  if [ -z "$1" ] || [ "$1" = "all" ]; then
+    while read id; do
+      ids+=("$id")
+    done <<< "$(all_light_ids)"
+  else
+    while read id; do
+      ids+=("$id")
+    done <<< "$(arg_to_light_id "$*")"
+  fi
+
+  for id in ${ids[@]}; do
+    res=$(get $api/lights/$id | jq .state.on)
+    if [ "$res" = "true" ]; then
+      on=false
+    else
+      on=true
+    fi
+    resp=$(put "{\"on\": $on}" $api/lights/$id/state)
+    parse_response "$resp"
+  done
+}
+
+# arg_to_light_id() takes an argument and returns a light ID.
+# i.e.     1      => 1
+#      "The lamp" => 1 
+# it assumes the light name is 
+arg_to_light_id() {
+  input="$*"
+  if echo "$input" | grep -qE "^[0-9]*$" > /dev/null; then
+    # if the input is a number just return it,
+    # it's probably the ID
+    echo $input 
+  else
+    # lower case the input
+    name=$(echo "$input" | tr 'A-Z' 'a-z')
+    # check the light info file and try to pull
+    # out the ID based on the input which is 
+    # presumably the name of the light
+    id=$(jq -e "map_values(.name) | \
+               to_entries | \
+               map(.value |= ascii_downcase) | \
+               .[] | \
+               select(.value == \"$name\") | \
+               .key" < $light_file
+    )
+    if [ $? != 0 ]; then
+      die "light '$input' not found"
+    fi
+    echo "$id" | sed 's/"//g'
+  fi
+}
+
+# show() shows information about a <type>
+# A <type> can be:
+#   - lights
+#   - scenes
+#   - groups
+show() {
+  if [ -z "$1" ]; then
+    die "usage 'lights show <type>'"
+  fi
+  case "$1" in
+    lights )
+      if [ -n "$2" ]; then
+        # TODO: turn arg to id
+        format=".[\"$2\"]"
+      else
+        format="."
+      fi
+      jq "$format" < $light_file
+      ;;
+    scenes )
+      jq "." < $scene_file 
+      ;;
+    groups )
+      die "NOT IMPLEMENT"
+      ;;
+  esac
+}
+
+# print_help() prints command usage
+print_help() {
+  echo "
+lights [toggle]
+       [show <type>]
+       [help]
+  "
+}
+
+# switch() turns lights on or off
+# usage: switch <"on"/"off"> <light>
+switch() {
+  ids=()
+  case "$1" in
+    on )
+      state=true
+      ;;
+    off )
+      state=false
+      ;;
+    * )
+      print_help_then_die "unknown argument '$1'"
+      ;;
+  esac
+
+  shift
+  if [ $# -gt 0 ]; then
+    for light; do
+      ids+=($( arg_to_light_id $light ))
+    done
+  else
+    ids+=($(all_light_ids))
+  fi
+  for id in ${ids[@]}; do
+    resp=$(put "{\"on\": $state}" $api/lights/$id/state)
+    parse_response "$resp"
+  done
+}
+
+# check_args() checks if the number of args
+# is correct
+check_args() {
+  echo hi
+}
+
+if [ -z "$HUE_IP_ADDRESS" ]; then 
+  die "HUE_IP_ADDRESS not set"
+fi
+
+if [ -z "$HUE_API_KEY" ]; then
+  die "HUE_API_KEY not set"
+fi
+
+api=http://$HUE_IP_ADDRESS/api/$HUE_API_KEY
+
+# TODO: check if arg count is right
+case "$1" in
+  toggle )
+    shift
+    toggle "$@"
+    ;;
+  show )
+    shift
+    show "$@"
+    ;;
+  id )
+    arg_to_light_id "$1"
+    ;;
+  help )
+    print_help
+    ;;
+  off )
+    shift
+    switch "off" "$@"
+    ;;
+  on )
+    shift
+    switch "on" "$@"
+    ;;
+  * )
+    print_help_then_die "error: unknown command '$1'"
+    ;;
+esac
