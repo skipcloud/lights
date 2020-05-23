@@ -2,14 +2,29 @@
 
 # TODO: work out a way to use set -e
 
+
+# Ensure we have environment variables set so
+# we can build a url for the bridge.
+# Check we have all the info files
+if [ -z "$HUE_IP_ADDRESS" ]; then
+  die "HUE_IP_ADDRESS not set"
+elif [ -z "$HUE_API_KEY" ]; then
+  die "HUE_API_KEY not set"
+elif [ ! -s $light_file ] ||
+     [ ! -s $group_file ] ||
+     [ ! -e $scene_file ] &&
+     [ "$1" != "update" ]; then
+  die "info files missing, run 'lights update'"
+fi
+
+api=http://$HUE_IP_ADDRESS/api/$HUE_API_KEY
+
 # called through PATH we need to follow the symlink
 # to get the actual file path, and then the root dir
 dir=$(dirname $(readlink $0))
-info_dir=$dir/.info
-light_file=$info_dir/lights
-scene_file=$info_dir/scenes
-group_file=$info_dir/groups
-scripts_dir=$dir/.scripts
+light_file=$dir/.info/lights
+scene_file=$dir/.info/scenes
+group_file=$dir/.info/groups
 
 # die() prints an error and exits with 1
 die() {
@@ -23,127 +38,14 @@ print_help_then_die() {
   die "error: $1"
 }
 
-# parse_response() takes whatever the resonse was for a curl
-# command and parses it with jq to present the user with a
-# succinct
-parse_response() {
-  err=$(jq -e '.[].error.description' <<< "$*")
-  if [ $? = 0 ]; then
-    die "$err"
-  fi
-  while read msg; do
-    echo "success: $msg"
-  done <<< "$(jq -c '.[] | .success' <<< "$*")"
-}
-
-# get() makes a GET request to the given url
-get() {
-  curl -s $1
-}
-
-# put() makes a PUT request to the give url with whatever data
-# is given to it
-put() {
-  curl -s --request PUT --data "$1" $2
-}
-
-all_light_ids() {
-  echo "$( jq 'keys  | .[]' < $light_file | sed 's/"//g' )"
-}
-
-# toggle() turns a light on/off
-toggle() {
-  ids=()
-  if [ -z "$1" ] || [ "$1" = "all" ]; then
-    while read id; do
-      ids+=("$id")
-    done <<< "$(all_light_ids)"
-  else
-    while read id; do
-      ids+=("$id")
-    done <<< "$(args_to_light_ids "$@")"
-  fi
-
-  for id in ${ids[@]}; do
-    res=$(get $api/lights/$id | jq .state.on)
-    if [ "$res" = "true" ]; then
-      on=false
-    else
-      on=true
-    fi
-    resp=$(put "{\"on\": $on}" $api/lights/$id/state)
-    parse_response "$resp"
-  done
-}
-
-# args_to_light_ids() takes an argument and returns a light ID.
-# i.e.     1      => 1
-#      "The lamp" => 1
-# it assumes the light name is
-args_to_light_ids() {
-  all_ids=($(jq 'keys | .[]' < $light_file))
-  for light; do
-    if grep -qE "^[0-9]*$" > /dev/null <<< "$light" &&
-       grep -qE $light <<< "${all_ids[@]}"; then
-      # if the input is a number just add it to our list of ids
-      # TODO: check light ID exists first
-      echo $light
-    else
-      # lower case the input
-      name=$(tr 'A-Z' 'a-z' <<< "$light")
-      # check the light info file and try to pull
-      # out the ID based on the input which is
-      # presumably the name of the light
-      id=$(jq -e "map_values(.name) | \
-                 to_entries | \
-                 map(.value |= ascii_downcase) | \
-                 .[] | \
-                 select(.value == \"$name\") | \
-                 .key" < $light_file
-      )
-      if [ $? != 0 ]; then
-        die "light '$light' not found"
-      fi
-      sed 's/"//g' <<< "$id"
-    fi
-  done
-}
-
-# show() shows information about a <type>
-# A <type> can be:
-#   - lights
-#   - scenes
-#   - groups
-show() {
-  if [ -z "$1" ]; then
-    die "usage 'lights show <type>'"
-  fi
-  case "$1" in
-    lights )
-      # TODO: add support for querying multiple lights
-      if [ -n "$2" ]; then
-        format=".[\"$(args_to_light_ids $2)\"]"
-      else
-        format="."
-      fi
-      jq "$format" < $light_file
-      ;;
-    scenes )
-      jq "." < $scene_file
-      ;;
-    groups )
-      die "NOT IMPLEMENT"
-      ;;
-  esac
-}
-
 # print_help() prints command usage
 print_help() {
   echo "
-lights toggle [all] [<lights>...]
-       on  [<lights>...]
-       off [<lights>...]
-       show <type> <name or ids>
+lights toggle [all] [<light name/id>...]
+       on  [<light name/id>...]
+       off [<light name/id...]
+       show <type> <name/id>
+       change <attribute> <value> <light name/id>...
        update
        help [<command>]
   "
@@ -221,35 +123,67 @@ print_command_help() {
   echo "$str"
 }
 
+# get() makes a GET request to the given url
+get() {
+  curl -s $1
+}
 
-# switch() turns lights on or off
-# usage: switch <"on"/"off"> <light>...
-switch() {
-  ids=()
-  case "$1" in
-    on )
-      state=true
-      ;;
-    off )
-      state=false
-      ;;
-    * )
-      print_help_then_die "unknown argument '$1'"
-      ;;
-  esac
+# put() makes a PUT request to the give url with whatever data
+# is given to it
+put() {
+  curl -s --request PUT --data "$1" $2
+}
 
-  shift
-  if [ $# -gt 0 ]; then
-    for light; do
-      ids+=($( args_to_light_ids $light ))
-    done
-  else
-    ids+=($(all_light_ids))
+# parse_response() takes whatever the resonse was for a curl
+# command and parses it with jq to present the user with a
+# succinct
+parse_response() {
+  err=$(jq -e '.[].error.description' <<< "$*")
+  if [ $? = 0 ]; then
+    die "$err"
   fi
+  while read msg; do
+    echo "success: $msg"
+  done <<< "$(jq -c '.[] | .success' <<< "$*")"
+}
 
-  for id in ${ids[@]}; do
-    resp=$(put "{\"on\": $state}" $api/lights/$id/state)
-    parse_response "$resp"
+# all_light_ids() returns the IDs of all the lights
+all_light_ids() {
+  echo "$( jq 'keys  | .[]' < $light_file | sed 's/"//g' )"
+}
+
+# args_to_light_ids() takes an argument and returns a light ID.
+# i.e.     1      => 1
+#      "The lamp" => 1
+args_to_light_ids() {
+  all_ids=($(jq 'keys | .[]' < $light_file))
+  for light; do
+    if [ -z "$light" ]; then
+      continue
+    fi
+    if grep -qE "^[0-9]*$" > /dev/null <<< "$light" &&
+       grep -qE $light <<< "${all_ids[@]}"; then
+      # if the input is a number just add it to our list of ids
+      # TODO: check light ID exists first
+      echo $light
+    else
+      # lower case the input
+      name=$(tr 'A-Z' 'a-z' <<< "$light")
+      # check the light info file and try to pull
+      # out the ID based on the input which is
+      # presumably the name of the light
+      id=$(jq -e "map_values(.name) | \
+                 to_entries | \
+                 map(.value |= ascii_downcase) | \
+                 .[] | \
+                 select(.value == \"$name\") | \
+                 .key" < $light_file
+      )
+      if [ $? != 0 ]; then
+        die "light '$light' not found"
+      fi
+      sed 's/"//g' <<< "$id"
+    fi
   done
 }
 
@@ -270,21 +204,119 @@ update_info_files() {
   ($dir/.scripts/fetch-info.sh)
 }
 
-# Ensure we have environment variables set so
-# we can build a url for the bridge.
-# Check we have all the info files
-if [ -z "$HUE_IP_ADDRESS" ]; then
-  die "HUE_IP_ADDRESS not set"
-elif [ -z "$HUE_API_KEY" ]; then
-  die "HUE_API_KEY not set"
-elif [ ! -s $light_file ] ||
-   [ ! -s $group_file ] ||
-   [ ! -e $scene_file ] &&
-   [ "$1" != "update" ]; then
-  die "info files missing, run 'lights update'"
-fi
+# toggle() turns a light on/off
+toggle() {
+  ids=()
+  if [ -z "$1" ] || [ "$1" = "all" ]; then
+    while read id; do
+      ids+=("$id")
+    done <<< "$(all_light_ids)"
+  else
+    while read id; do
+      ids+=("$id")
+    done <<< "$(args_to_light_ids "$@")"
+  fi
 
-api=http://$HUE_IP_ADDRESS/api/$HUE_API_KEY
+  for id in ${ids[@]}; do
+    res=$(get $api/lights/$id | jq .state.on)
+    if [ "$res" = "true" ]; then
+      on=false
+    else
+      on=true
+    fi
+    resp=$(put "{\"on\": $on}" $api/lights/$id/state)
+    parse_response "$resp"
+  done
+}
+
+# show() shows information about a <type>
+# A <type> can be:
+#   - lights
+#   - scenes
+#   - groups
+show() {
+  if [ -z "$1" ]; then
+    die "usage 'lights show <type>'"
+  fi
+  case "$1" in
+    lights )
+      # TODO: add support for querying multiple lights
+      if [ -n "$2" ]; then
+        format=".[\"$(args_to_light_ids "$2")\"]"
+      else
+        format="."
+      fi
+      jq "$format" < $light_file
+      ;;
+    scenes )
+      jq "." < $scene_file
+      ;;
+    groups )
+      die "NOT IMPLEMENT"
+      ;;
+  esac
+}
+
+# switch() turns lights on or off
+# usage: switch <"on"/"off"> <light>...
+switch() {
+  ids=()
+  case "$1" in
+    on )
+      state=true
+      ;;
+    off )
+      state=false
+      ;;
+    * )
+      print_help_then_die "unknown argument '$1'"
+      ;;
+  esac
+
+  shift
+  if [ $# -gt 0 ] && [ -n "$1" ]; then
+    for light; do
+      ids+=($( args_to_light_ids "$light" ))
+    done
+  else
+    ids+=($(all_light_ids))
+  fi
+
+  for id in ${ids[@]}; do
+    resp=$(put "{\"on\": $state}" $api/lights/$id/state)
+    parse_response "$resp"
+  done
+}
+
+change() {
+  case "$1" in
+    colour | color )
+      shift
+      case "$1" in
+        red )
+          shift
+          resp=$(put "{\"hue\": 0}"  $api/lights/$(args_to_light_ids "$*")/state)
+          ;;
+        green )
+          shift
+          resp=$(put "{\"hue\": 22550}"  $api/lights/$(args_to_light_ids "$*")/state)
+          ;;
+        blue )
+          shift
+          resp=$(put "{\"hue\": 46920}"  $api/lights/$(args_to_light_ids "$*")/state)
+          ;;
+          * )
+          die "unknown colour '$1'"
+          ;;
+      esac
+      shift
+      parse_response "$resp"
+      # put "{\"hue\": 46920}"  $api/lights/$(args_to_light_ids "$2")/state
+      ;;
+  esac
+}
+
+
 
 case "$1" in
   toggle )
@@ -316,11 +348,11 @@ case "$1" in
     ;;
   off )
     shift
-    switch "off" "$@"
+    switch "off" "$*"
     ;;
   on )
     shift
-    switch "on" "$@"
+    switch "on" "$*"
     ;;
   state )
     # TODO: get stage of lights
@@ -335,6 +367,8 @@ case "$1" in
     #      46920 is blue
     #      or 'change colour $num'. In which the colour can be Hex or
     #      decimal
+    shift
+    change "$@"
     ;;
   update )
     update_info_files
