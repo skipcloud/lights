@@ -9,22 +9,23 @@ info_dir=$dir/.info
 light_file=$info_dir/lights
 scene_file=$info_dir/scenes
 group_file=$info_dir/groups
+scripts_dir=$dir/.scripts
 
 # die() prints an error and exits with 1
 die() {
   echo "error: $1" >&2
-  exit 1 
+  exit 1
 }
 
 # print_help_then_die() prints help then calls die
 print_help_then_die() {
   print_help >&2
-  die "$1"
-} 
+  die "error: $1"
+}
 
 # parse_response() takes whatever the resonse was for a curl
-# command and parses it with jq to present the user with a 
-# succinct 
+# command and parses it with jq to present the user with a
+# succinct
 parse_response() {
   err=$(jq -e '.[].error.description' <<< "$*")
   if [ $? = 0 ]; then
@@ -60,7 +61,7 @@ toggle() {
   else
     while read id; do
       ids+=("$id")
-    done <<< "$(arg_to_light_id "$*")"
+    done <<< "$(args_to_light_ids "$@")"
   fi
 
   for id in ${ids[@]}; do
@@ -75,34 +76,37 @@ toggle() {
   done
 }
 
-# arg_to_light_id() takes an argument and returns a light ID.
+# args_to_light_ids() takes an argument and returns a light ID.
 # i.e.     1      => 1
-#      "The lamp" => 1 
-# it assumes the light name is 
-arg_to_light_id() {
-  input="$*"
-  if echo "$input" | grep -qE "^[0-9]*$" > /dev/null; then
-    # if the input is a number just return it,
-    # it's probably the ID
-    echo $input 
-  else
-    # lower case the input
-    name=$(echo "$input" | tr 'A-Z' 'a-z')
-    # check the light info file and try to pull
-    # out the ID based on the input which is 
-    # presumably the name of the light
-    id=$(jq -e "map_values(.name) | \
-               to_entries | \
-               map(.value |= ascii_downcase) | \
-               .[] | \
-               select(.value == \"$name\") | \
-               .key" < $light_file
-    )
-    if [ $? != 0 ]; then
-      die "light '$input' not found"
+#      "The lamp" => 1
+# it assumes the light name is
+args_to_light_ids() {
+  all_ids=($(jq 'keys | .[]' < $light_file))
+  for light; do
+    if grep -qE "^[0-9]*$" > /dev/null <<< "$light" &&
+       grep -qE $light <<< "${all_ids[@]}"; then
+      # if the input is a number just add it to our list of ids
+      # TODO: check light ID exists first
+      echo $light
+    else
+      # lower case the input
+      name=$(tr 'A-Z' 'a-z' <<< "$light")
+      # check the light info file and try to pull
+      # out the ID based on the input which is
+      # presumably the name of the light
+      id=$(jq -e "map_values(.name) | \
+                 to_entries | \
+                 map(.value |= ascii_downcase) | \
+                 .[] | \
+                 select(.value == \"$name\") | \
+                 .key" < $light_file
+      )
+      if [ $? != 0 ]; then
+        die "light '$light' not found"
+      fi
+      sed 's/"//g' <<< "$id"
     fi
-    echo "$id" | sed 's/"//g'
-  fi
+  done
 }
 
 # show() shows information about a <type>
@@ -116,16 +120,16 @@ show() {
   fi
   case "$1" in
     lights )
+      # TODO: add support for querying multiple lights
       if [ -n "$2" ]; then
-        # TODO: turn arg to id
-        format=".[\"$2\"]"
+        format=".[\"$(args_to_light_ids $2)\"]"
       else
         format="."
       fi
       jq "$format" < $light_file
       ;;
     scenes )
-      jq "." < $scene_file 
+      jq "." < $scene_file
       ;;
     groups )
       die "NOT IMPLEMENT"
@@ -136,14 +140,90 @@ show() {
 # print_help() prints command usage
 print_help() {
   echo "
-lights [toggle]
-       [show <type>]
-       [help]
+lights toggle [all] [<lights>...]
+       on  [<lights>...]
+       off [<lights>...]
+       show <type> <name or ids>
+       update
+       help [<command>]
   "
 }
 
+# print_command_help() prints help for commands
+print_command_help() {
+  case "$1" in
+    toggle )
+      str="
+      Toggle is used to flip a light or lights on or off, depending on
+      whether the light was previous on or off.
+
+      toggle [all]           - this will toggle all of the lights on
+                               or off.
+      toggle <name or ID>... - any lights referenced by their ID or
+                               name will be toggled on or off.
+      "
+      ;;
+    show )
+      str="
+      Show is used to show information about specific lights, scenes,
+      or groups. The bridge is queried for up-to-date information
+      which is then displayed in its JSON format.
+
+      show lights                 - show information on all lights.
+      show lights <name or ID>... - show information on all the
+                                    lights specified by their ID or
+                                    name.
+
+      show groups                 - show information on all groups.
+      show groups <name or ID>... - show information on all the
+                                    groups specified by their ID or
+                                    name.
+
+      show scenes                 - show information on all scenes.
+      show scenes <name or ID>... - show information on all the
+                                    scenes specified by their ID or
+                                    name.
+      "
+      ;;
+    on | off )
+      str="
+      On and Off are used to turn lights on or off respectively.
+
+      on                  - turn off all lights
+      off                 - turn off all lights
+      on  <name or ID>... - turn on the specified lights
+      off <name or ID>... - turn off the specified lights
+      "
+      ;;
+    update )
+      str="
+      Update is used to fetch the most recent information on your
+      lights, groups, and scenes. The information is cached in some
+      files which the script makes use of in a lot of its commands.
+      The command is useful if the existing info files are garbled or
+      were accidentally deleted.
+
+      update - update the info files for lights, groups, scenes.
+      "
+      ;;
+    help )
+      str="
+      Help is used to show help documentation for various commands.
+
+      help <command> - prints a helpful rundown of how to use the
+                       command.
+      "
+      ;;
+    * )
+      die "unknown command '$1'"
+      exit 1
+  esac
+  echo "$str"
+}
+
+
 # switch() turns lights on or off
-# usage: switch <"on"/"off"> <light>
+# usage: switch <"on"/"off"> <light>...
 switch() {
   ids=()
   case "$1" in
@@ -161,48 +241,78 @@ switch() {
   shift
   if [ $# -gt 0 ]; then
     for light; do
-      ids+=($( arg_to_light_id $light ))
+      ids+=($( args_to_light_ids $light ))
     done
   else
     ids+=($(all_light_ids))
   fi
+
   for id in ${ids[@]}; do
     resp=$(put "{\"on\": $state}" $api/lights/$id/state)
     parse_response "$resp"
   done
 }
 
-# check_args() checks if the number of args
-# is correct
-check_args() {
-  echo hi
+# check_num_args() checks the number of arguments
+# is at least higher than the number provided and
+# dies if the number of args is less than that.
+check_num_args() {
+  num=$1
+  shift
+  [ $# -lt $num ] && print_help_then_die "wrong number of arguments"
 }
 
-if [ -z "$HUE_IP_ADDRESS" ]; then 
-  die "HUE_IP_ADDRESS not set"
-fi
+# update_info_files() uses an external script to update
+# the info files
+update_info_files() {
+  # run in a subshell to stop any variabes
+  # from leaking into the scope of the script
+  ($dir/.scripts/fetch-info.sh)
+}
 
-if [ -z "$HUE_API_KEY" ]; then
+# Ensure we have environment variables set so
+# we can build a url for the bridge.
+# Check we have all the info files
+if [ -z "$HUE_IP_ADDRESS" ]; then
+  die "HUE_IP_ADDRESS not set"
+elif [ -z "$HUE_API_KEY" ]; then
   die "HUE_API_KEY not set"
+elif [ ! -s $light_file ] ||
+   [ ! -s $group_file ] ||
+   [ ! -e $scene_file ] &&
+   [ "$1" != "update" ]; then
+  die "info files missing, run 'lights update'"
 fi
 
 api=http://$HUE_IP_ADDRESS/api/$HUE_API_KEY
 
-# TODO: check if arg count is right
 case "$1" in
   toggle )
+    # Toggle is used to flip a light or lights on or off
     shift
     toggle "$@"
     ;;
   show )
+    # Show will display information about lights, groups,
+    # and scenes. It can take
     shift
+    check_num_args 1 "$@"
+    # update info files but suppress any output
+    update_info_files > /dev/null
     show "$@"
     ;;
   id )
-    arg_to_light_id "$1"
+    shift
+    check_num_args 1 "$@"
+    args_to_light_ids "$@"
     ;;
   help )
-    print_help
+    shift
+    if [ $# -eq 0 ]; then
+      print_help
+      exit 0
+    fi
+    print_command_help $1
     ;;
   off )
     shift
@@ -212,7 +322,24 @@ case "$1" in
     shift
     switch "on" "$@"
     ;;
+  state )
+    # TODO: get stage of lights
+    ;;
+  change )
+    #TODO: have it accept something like 'change colour red <lamps>...'
+    #      where 'red' is from a set of basic colours, and these
+    #      colours will map to a number between 0 and 65535.
+    #      0 and 65535 are red
+    #      1275 is yellow
+    #      25500 is green
+    #      46920 is blue
+    #      or 'change colour $num'. In which the colour can be Hex or
+    #      decimal
+    ;;
+  update )
+    update_info_files
+    ;;
   * )
-    print_help_then_die "error: unknown command '$1'"
+    print_help_then_die "unknown command '$1'"
     ;;
 esac
