@@ -3,4 +3,4 @@
 local -a lights=($(jq '.[] | .name' < LIGHT_FILE))
 
 _arguments -C "1:command:( on off toggle show help )" \
-              "2:light name/id:($lights)"
+              "*:light name/id:($lights)"

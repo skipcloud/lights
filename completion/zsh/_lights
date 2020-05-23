@@ -1,6 +1,6 @@
 #compdef lights
 
-local -a lights=($(cat /home/skip/code/personal/lights/.info/lights | jq '.[] | .name'))
+local -a lights=($(jq '.[] | .name' < /home/skip/code/personal/lights/.info/lights))
 
-_arguments -C "1:command:( on off toggle help )" \
-              "2:light name/id:($lights)"
+_arguments -C "1:command:( on off toggle show help )" \
+              "*:light name/id:($lights)"
